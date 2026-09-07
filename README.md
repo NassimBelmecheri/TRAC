@@ -141,6 +141,20 @@ python cli.py reproduce --rq 4 --constraints "X!=Y,X+Y>Z"  # Table 4 (constraint
 
 Each run writes a CSV to `artifacts/results/`.
 
+### Pretrained checkpoints & datasets
+
+To reproduce the paper's **pretrained** numbers exactly, download the checkpoints
+and datasets (~340 MB, not stored in Git) and place them under an *assets root*:
+
+- **Google Drive:** https://drive.google.com/drive/folders/1PjKlSwLgHWxvHn25auu9Qx5KPHXNLYSS?usp=sharing
+  (`trac_reproducibility_assets.zip`)
+- Extract into `reproducibility/` (the default location), or extract anywhere and
+  set `TRAC_ASSETS=/path/to/assets`.
+- See [`reproducibility/README.md`](reproducibility/README.md) for the exact layout.
+
+Without these assets the platform still runs end to end — it simply **generates**
+data and **trains** fresh models on the fly.
+
 ---
 
 ## Code layout

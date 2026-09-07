@@ -7,6 +7,10 @@ __pycache__/
 # TRAC runtime artifacts (generated data, trained models, results)
 artifacts/
 
+# Reproducibility assets are downloaded from Drive, not versioned (keep the doc)
+reproducibility/*
+!reproducibility/README.md
+
 # Logs / scratch
 *.log
 reproduce_all_rqs.py

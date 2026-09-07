@@ -35,6 +35,34 @@ from .acquire import _make_learner, evaluate_network
 
 REPO = utils.REPO_ROOT
 
+
+def _default_assets_root():
+    """Root under which the pretrained checkpoints and per-variant datasets live.
+
+    Expected layout::
+
+        <assets>/conacq_datasets/         # TO1 datasets
+        <assets>/TO1/models/              # TO1 checkpoints
+        <assets>/TO2/  and  TO2/models/   # TO2 datasets + checkpoints
+        <assets>/TO3/  and  TO3/models/   # TO3 datasets + checkpoints
+
+    Resolution order:
+      1. the ``TRAC_ASSETS`` environment variable, if set;
+      2. the original repository tree (``REPO``) when it still holds the assets;
+      3. ``<repo>/reproducibility`` (created on demand) otherwise.
+    """
+    env = os.environ.get("TRAC_ASSETS")
+    if env:
+        return env
+    if os.path.isdir(os.path.join(REPO, "TO3")) or \
+       os.path.isdir(os.path.join(REPO, "conacq_datasets")):
+        return REPO
+    return os.path.join(utils.PLATFORM_ROOT, "reproducibility")
+
+
+# Directory holding the pretrained checkpoints / datasets used for reproduction.
+ASSETS_ROOT = _default_assets_root()
+
 # benchmark key -> (TO1/conacq token, TO2 token, TO3 token)
 LEGACY_TOKENS = {
     "sudoku":           ("sudoku_9", "sudoku_9", "sudoku_9"),
@@ -68,11 +96,11 @@ def find_dataset(benchmark, variant, theta="0.8"):
     """Return ``(path, source)`` for an existing dataset, or ``(None, None)``."""
     t1, t2, t3 = LEGACY_TOKENS[benchmark]
     if variant == "TO1":
-        p = os.path.join(REPO, "conacq_datasets", f"{t1}.csv")
+        p = os.path.join(ASSETS_ROOT, "conacq_datasets", f"{t1}.csv")
     elif variant == "TO2":
-        p = os.path.join(REPO, "TO2", f"dataset_{t2}.csv")
+        p = os.path.join(ASSETS_ROOT, "TO2", f"dataset_{t2}.csv")
     else:
-        p = os.path.join(REPO, "TO3", f"dataset_{t3}_{theta}.csv")
+        p = os.path.join(ASSETS_ROOT, "TO3", f"dataset_{t3}_{theta}.csv")
     return (p, "existing") if os.path.exists(p) else (None, None)
 
 
@@ -87,11 +115,11 @@ def find_models(benchmark, variant, theta="0.8"):
     e.g. nqueens has 4/6/8-variable models)."""
     t1, t2, t3 = LEGACY_TOKENS[benchmark]
     if variant == "TO1":
-        pat = os.path.join(REPO, "TO1", "models", f"best_model_{t1}.csv_*_0.0.pth")
+        pat = os.path.join(ASSETS_ROOT, "TO1", "models", f"best_model_{t1}.csv_*_0.0.pth")
     elif variant == "TO2":
-        pat = os.path.join(REPO, "TO2", "models", f"best_model_dataset_{t2}.csv_*_0.0.pth")
+        pat = os.path.join(ASSETS_ROOT, "TO2", "models", f"best_model_dataset_{t2}.csv_*_0.0.pth")
     else:
-        pat = os.path.join(REPO, "TO3", "models", f"best_model_dataset_{t3}_{theta}.csv_*_0.0.pth")
+        pat = os.path.join(ASSETS_ROOT, "TO3", "models", f"best_model_dataset_{t3}_{theta}.csv_*_0.0.pth")
     return sorted(glob.glob(pat))
 
 
