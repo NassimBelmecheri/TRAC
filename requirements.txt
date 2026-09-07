@@ -1,0 +1,10 @@
+# TRAC platform runtime dependencies.
+# pycona (the symbolic CA engine) lives at the repository root and is imported
+# directly via sys.path, so it is not listed here.
+torch>=2.0
+cpmpy>=0.9
+python-sat>=0.1.8
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.3
+streamlit>=1.30
