@@ -96,7 +96,15 @@ class CSPAttentionModel(nn.Module):
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim, nhead=num_heads, batch_first=True, dropout=0.1
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=4)
+        # ``enable_nested_tensor=False`` avoids a PyTorch fast-path crash
+        # ("to_padded_tensor: at least one constituent tensor should have
+        # non-zero numel") that occurs when a membership query is encoded as a
+        # fully-padded sequence (e.g. small unary-scope queries during
+        # acquisition). It only disables an optimisation; the result is identical
+        # and existing checkpoints load unchanged.
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer, num_layers=4, enable_nested_tensor=False
+        )
 
         # Constraint-graph component (M, V, S)
         self.conflict_net = ConstraintGraphComponent(grid_size, embed_dim)
