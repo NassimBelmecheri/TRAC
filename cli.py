@@ -105,7 +105,8 @@ def cmd_reproduce(a):
         df = R.rq2(benchmarks=bl, source=a.source, epochs=a.epochs,
                    generate_missing=a.generate_missing, progress=_p)
     elif a.rq == 3:
-        df = R.rq3(benchmarks=bl, time_limit=a.time_limit, progress=_p)
+        df = R.rq3(benchmarks=bl, source=a.source, epochs=a.epochs,
+                   time_limit=a.time_limit, progress=_p)
     elif a.rq == 4:
         cons = [c.strip() for c in a.constraints.split(",")] if a.constraints else None
         df = R.rq4(constraints=cons, epochs=a.epochs, progress=_p)
@@ -169,7 +170,8 @@ def build_parser():
     rp.add_argument("--benchmarks", help="comma-separated benchmark names (default: subset)")
     rp.add_argument("--constraints", help="RQ4 only: comma-separated constraint names")
     rp.add_argument("--source", default="pretrained", choices=["pretrained", "train"],
-                    help="RQ2 only: use existing checkpoints or retrain")
+                    help="RQ2/RQ3: use existing checkpoints or retrain with the "
+                         "corrected data generator")
     rp.add_argument("--generate_missing", action="store_true",
                     help="RQ2 only: synthesise data for benchmarks lacking a shipped dataset")
     rp.add_argument("--epochs", type=int, default=60)

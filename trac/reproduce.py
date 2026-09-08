@@ -313,19 +313,51 @@ def rq1(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
 # --------------------------------------------------------------------------- #
 # RQ3 - learner x neural-oracle acquisition (Table 3)
 # --------------------------------------------------------------------------- #
+def _get_or_train_oracle(b, v, scale, device, epochs, n_samples, theta, progress):
+    """Return the path of a model for ``(benchmark, variant)``, training a fresh
+    one with the (corrected) data generator when ``epochs`` is given."""
+    from .oracle import TransformerOracle  # noqa
+    df, meta = generate_dataset(b, scale=scale, variant=v, n_samples=n_samples,
+                                seed=42, theta=float(theta))
+    res = train_oracle(df, benchmark=b, scale=meta["scale"], variant=v,
+                       model_name=f"rq3_{b}_{v}", epochs=epochs, batch_size=128,
+                       device=device)
+    if progress:
+        m = res["best_metrics"]
+        progress(f"  trained {b}/{v}: acc={m['accuracy']:.3f} rec={m['recall']:.3f}")
+    return res["model_path"]
+
+
 def rq3(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
         variants=("TO1", "TO2", "TO3"), scale=None, theta="0.8",
-        time_limit=8, device=None, progress=None):
-    """Reproduce Table 3 (acquired-network quality for learner x oracle pairs)."""
+        time_limit=8, source="pretrained", epochs=120, n_samples=4000,
+        device=None, progress=None):
+    """Reproduce Table 3 (acquired-network quality for learner x oracle pairs).
+
+    :param source: ``"pretrained"`` uses the shipped legacy checkpoints;
+        ``"train"`` trains fresh oracles with the corrected data generator
+        (needed to reproduce the paper's TO3 acquisition numbers, since the
+        shipped checkpoints predate the data-generation fix).
+    """
     device = device or utils.get_device()
     benchmarks = benchmarks or FAST_BENCHMARKS
     rows = []
     from .oracle import TransformerOracle
     for b in benchmarks:
         for v in variants:
-            mp = find_model(b, v, theta)
-            if mp is None:
+            try:
+                if source == "train":
+                    mp = _get_or_train_oracle(b, v, scale, device, epochs,
+                                              n_samples, theta, progress)
+                else:
+                    mp = find_model(b, v, theta)
+                    if mp is None:
+                        continue
+            except Exception as e:
+                rows.append({"benchmark": b, "oracle": v, "learner": "*",
+                             "result": f"train-err:{type(e).__name__}"})
                 continue
+
             for lr in learners:
                 try:
                     instance, ground, meta = build_benchmark(b, scale)
@@ -349,3 +381,4 @@ def rq3(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
                 if progress:
                     progress(f"RQ3 {b}/{v}/{lr} -> {rows[-1]}")
     return pd.DataFrame(rows)
+

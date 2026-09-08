@@ -486,19 +486,26 @@ with tab_repro:
     # ---- RQ3 ---------------------------------------------------------------
     elif rq.startswith("RQ3"):
         st.markdown("Acquired-network **precision / recall / F1** for each "
-                    "learner × pretrained-oracle pairing.")
+                    "learner × oracle pairing.")
         bl = st.multiselect("Benchmarks", all_benches, default=["murder", "zebra"])
         variants = st.multiselect("Oracle variants", list(VARIANTS),
                                    default=["TO3"])
         learners = st.multiselect("Learners", list(LEARNERS),
                                    default=["FASTCA"])
+        c1, c2 = st.columns(2)
+        src3 = c1.radio("Oracle source", ["pretrained", "train"], horizontal=True,
+                        help="pretrained = shipped legacy checkpoints (fast, but "
+                             "predate the data-gen fix); train = retrain oracles "
+                             "with the corrected generator (reproduces the paper)")
+        ep3 = c2.slider("Epochs (train mode)", 20, 200, 100, key="rq3_ep")
         tl = st.slider("Per-query time limit (s)", 1, 20, 6, key="rq3_tl")
         if st.button("Run RQ3", type="primary"):
             status = st.status("Running RQ3 ...", expanded=True)
             log = status.empty()
             try:
                 df = R.rq3(benchmarks=bl, variants=tuple(variants),
-                           learners=tuple(learners), time_limit=int(tl),
+                           learners=tuple(learners), source=src3, epochs=int(ep3),
+                           time_limit=int(tl),
                            progress=lambda m: log.write(str(m)))
                 status.update(label="Done", state="complete")
                 st.dataframe(df, width='stretch', hide_index=True)
