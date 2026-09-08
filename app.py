@@ -26,9 +26,10 @@ from trac import (
     classify_dataset, classify_assignment, acquire,
     VARIANTS, LEARNERS, utils, reproduce as R,
 )
-from trac.benchmarks import BENCHMARKS, default_scale
+from trac.benchmarks import BENCHMARKS, default_scale, PARAMETRIC
 from trac.checkpoint import load_config
 from trac.reproduce import LEGACY_TOKENS, CHECKER_CONSTRAINTS, PAPER_BENCHMARKS
+from trac import viz
 
 st.set_page_config(page_title="TRAC Platform", page_icon="🧩", layout="wide")
 
@@ -138,6 +139,30 @@ with tab_gen:
     g_samples = c4.slider("Approx. #samples", 500, 12000, 3000, step=500)
     g_seed = c5.number_input("Seed", value=42, step=1)
 
+    # --- Parametric benchmarks (e.g. custom Sudoku dimensions) ---------------
+    g_params = None
+    if g_bench in PARAMETRIC:
+        spec = PARAMETRIC[g_bench]
+        with st.expander(f"⚙️ Custom {g_bench} parameters", expanded=(g_bench == "sudoku")):
+            use_custom = st.checkbox("Use custom parameters (overrides Scale)",
+                                     value=False, key="g_use_custom")
+            pcols = st.columns(len(spec["params"]))
+            vals = {}
+            for (arg, (label, dflt, lo, hi)), col in zip(spec["params"].items(), pcols):
+                vals[arg] = col.number_input(label, min_value=lo, max_value=hi,
+                                             value=dflt, step=1, key=f"g_p_{arg}")
+            if spec.get("note"):
+                st.caption(spec["note"])
+            if g_bench == "sudoku":
+                ok = vals["block_size_row"] * vals["block_size_col"] == vals["grid_size"]
+                if use_custom and not ok:
+                    st.warning("block rows × block cols must equal grid size for a valid "
+                               "Sudoku (e.g. 3×3→9).")
+                st.caption(f"→ {vals['grid_size']}×{vals['grid_size']} grid = "
+                           f"{vals['grid_size']**2} variables, domain 1..{vals['grid_size']}")
+            if use_custom:
+                g_params = vals
+
     if st.button("Generate data", type="primary"):
         status = st.status("Generating ...", expanded=True)
         log = status.empty()
@@ -148,8 +173,9 @@ with tab_gen:
         try:
             df, meta = generate_dataset(g_bench, scale=g_scale, variant=g_variant,
                                         n_samples=int(g_samples), seed=int(g_seed),
-                                        progress=prog)
-            out = utils.data_path(f"{g_bench}_{g_scale}_{g_variant}.csv")
+                                        params=g_params, progress=prog)
+            tag = meta["scale"]
+            out = utils.data_path(f"{g_bench}_{tag}_{g_variant}.csv")
             df.to_csv(out, index=False)
             st.session_state["dataset"] = df
             st.session_state["dataset_meta"] = meta
@@ -225,15 +251,62 @@ with tab_train:
 
     if "train_res" in st.session_state:
         res = st.session_state["train_res"]
+        bm = res["best_metrics"]
         st.success(f"Best checkpoint saved to `{res['model_path']}` "
                    f"({res['train_time_s']}s on {res['device']})")
-        metric_row(res["best_metrics"])
-        hist = pd.DataFrame(res["history"])
-        cc1, cc2 = st.columns(2)
-        cc1.line_chart(hist.set_index("epoch")[["accuracy", "recall", "precision"]])
-        cc2.line_chart(hist.set_index("epoch")[["train_loss"]])
-        st.write("**Confusion matrix (validation)**")
-        st.dataframe(confusion_df(res["best_metrics"]["confusion"]))
+
+        # --- headline metrics ---
+        metric_row(bm)
+
+        # --- collapse warning (all-one-class) ---
+        cm = bm["confusion"]
+        if bm["recall"] == 0.0 or bm["recall"] == 1.0 or abs(bm["accuracy"] - 0.5) < 1e-6:
+            st.warning("⚠️ The model looks **collapsed to a single class** "
+                       "(recall 0 or 1, accuracy ≈ 0.5). This usually means it hasn't "
+                       "converged yet — train more epochs, use a smaller **scale**, or "
+                       "the **TO3** variant. Large paper-scale problems need many epochs.")
+
+        st.divider()
+        hist = res["history"]
+        labels = res.get("val_labels")
+        probs = res.get("val_probs")
+
+        # --- curves row: metrics + loss ---
+        c1, c2 = st.columns(2)
+        c1.pyplot(viz.metric_curves_fig(hist))
+        c2.pyplot(viz.loss_curve_fig(hist))
+
+        # --- confusion matrices (counts + normalised) ---
+        st.subheader("Confusion matrix")
+        c3, c4 = st.columns(2)
+        c3.pyplot(viz.confusion_heatmap(cm, normalize=False))
+        c4.pyplot(viz.confusion_heatmap(cm, normalize=True))
+
+        # --- ROC / PR / score distribution (need probabilities) ---
+        if labels is not None and probs is not None:
+            st.subheader("Discrimination")
+            c5, c6, c7 = st.columns(3)
+            c5.pyplot(viz.roc_curve_fig(labels, probs))
+            c6.pyplot(viz.pr_curve_fig(labels, probs))
+            c7.pyplot(viz.prob_hist_fig(labels, probs))
+
+        # --- derived statistics table ---
+        st.subheader("Detailed statistics")
+        stats = viz.derived_stats(cm, labels, probs)
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            st.dataframe(pd.DataFrame(
+                [(k, stats[k]) for k in ("TP", "TN", "FP", "FN")],
+                columns=["count", "value"]), width='stretch', hide_index=True)
+        with sc2:
+            st.dataframe(pd.DataFrame(
+                [(k, v) for k, v in stats.items() if k not in ("TP", "TN", "FP", "FN")],
+                columns=["metric", "value"]), width='stretch', hide_index=True)
+
+        with st.expander("Per-epoch history (raw)"):
+            st.dataframe(pd.DataFrame(hist)[
+                ["epoch", "train_loss", "accuracy", "precision", "recall", "f1"]],
+                width='stretch', hide_index=True)
 
 # --------------------------------------------------------------------------- #
 # 3. Predict

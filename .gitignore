@@ -16,6 +16,9 @@ reproducibility/*
 reproduce_all_rqs.py
 gen_missing.py
 
+# Generated benchmark instances (created on the fly by pycona)
+job_shop_j*_m*_h*_s*.json
+
 # Virtual environments
 .venv/
 venv/

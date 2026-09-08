@@ -57,6 +57,7 @@ def train_oracle(df, benchmark=None, scale=None, variant=None, model_name=None,
     history = []
     best_score = -1.0
     best_metrics = None
+    best_probs = best_labels = None
     if model_name is None:
         model_name = f"toracle_{benchmark}_{variant}"
     pth = utils.model_path(f"{utils.safe_filename(model_name)}.pth")
@@ -77,7 +78,7 @@ def train_oracle(df, benchmark=None, scale=None, variant=None, model_name=None,
             run_loss += loss.item()
         avg_loss = run_loss / max(1, len(tr_loader))
 
-        val_metrics = _evaluate(model, va_loader, device)
+        val_metrics, val_probs, val_labels = _evaluate(model, va_loader, device, return_probs=True)
         val_metrics["epoch"] = epoch
         val_metrics["train_loss"] = avg_loss
         history.append(val_metrics)
@@ -86,6 +87,7 @@ def train_oracle(df, benchmark=None, scale=None, variant=None, model_name=None,
         if score > best_score:
             best_score = score
             best_metrics = val_metrics
+            best_probs, best_labels = val_probs, val_labels
             save_checkpoint(model, pth, {
                 "num_values": num_values,
                 "num_positions": num_positions,
@@ -116,11 +118,13 @@ def train_oracle(df, benchmark=None, scale=None, variant=None, model_name=None,
         "history": history,
         "num_values": num_values,
         "num_positions": num_positions,
+        "val_probs": best_probs.tolist() if best_probs is not None else None,
+        "val_labels": best_labels.tolist() if best_labels is not None else None,
     }
 
 
 @torch.no_grad()
-def _evaluate(model, loader, device):
+def _evaluate(model, loader, device, return_probs=False):
     model.eval()
     probs, labels = [], []
     for bx, by in loader:
@@ -137,10 +141,13 @@ def _evaluate(model, loader, device):
     labels = np.array(labels)
     pred = (probs >= 0.5).astype(int)
     cm = confusion_matrix(labels, pred, labels=[0, 1])
-    return {
+    metrics = {
         "accuracy": float(accuracy_score(labels, pred)),
         "precision": float(precision_score(labels, pred, zero_division=0)),
         "recall": float(recall_score(labels, pred, zero_division=0)),
         "f1": float(f1_score(labels, pred, zero_division=0)),
         "confusion": cm.tolist(),
     }
+    if return_probs:
+        return metrics, probs, labels
+    return metrics

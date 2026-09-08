@@ -16,6 +16,7 @@ Variants (paper "Variants of the T-ORACLE"):
 Every example is encoded as a fixed length-``n`` integer vector where 0 marks an
 unassigned variable (padding) and domain values are >= 1.
 """
+import math
 import random
 
 import numpy as np
@@ -156,15 +157,36 @@ def _gen_to2(oracle, X, d_min, d_max, n_samples, rng, seed, progress):
     return rows, labels
 
 
-def _gen_to3(oracle, X, d_min, d_max, n_samples, rng, seed, progress, theta=0.8):
-    """Constraint-specific tuples restricted to each target scope."""
+def _gen_to3(oracle, X, d_min, d_max, n_samples, rng, seed, progress,
+             theta=0.8, non_constraint_ratio=1.0):
+    """Constraint-specific partial assignments (paper's TO3).
+
+    Faithful to the reference ``ScopeFocusedGenerator`` used for the paper:
+
+      * **Stage 1 - real constraints.** For each target scope (the *right*
+        scopes) we split the tuples over that scope's domain into satisfying
+        (``rel(c)``) and violating (``N(c)``) tuples, and keep a proportion
+        ``theta`` of each (paper: "a proportion theta of positive tuples from
+        rel(c) ... together with an equal number of tuples from N(c)").
+      * **Stage 2 - neutral (non-constraint) examples.** We inject partial
+        assignments on variable pairs that carry *no* constraint, labelled
+        valid, to teach the oracle "no constraint here => valid". Without these
+        the oracle is out-of-distribution on non-target scopes and, during
+        acquisition, hallucinates a constraint on every pair (e.g. learning
+        120 = C(16,2) constraints on 4x4 Sudoku instead of 56). Their number is
+        ``non_constraint_ratio`` times the number of Stage-1 examples.
+      * **Stage 4 - balance.** The final set is balanced 50/50 valid/invalid.
+
+    Each example is embedded into a length-``n`` row with values placed at the
+    scope's variable positions and 0 elsewhere.
+    """
+    import itertools
+
     n = len(X)
     var_index = {v.name: i for i, v in enumerate(X)}
 
-    # unique scopes of the target network, each paired with the target
-    # constraints acting on that scope (or a sub-scope of it). Precomputing this
-    # lets us label a sampled tuple by evaluating only the few relevant
-    # constraints instead of scanning the whole oracle on every sample.
+    # Unique target scopes, each paired with the target constraints acting on
+    # that scope (or a sub-scope of it). These are the *right* scopes to supervise.
     scopes = []
     scope_rel = []
     seen = set()
@@ -180,55 +202,121 @@ def _gen_to3(oracle, X, d_min, d_max, n_samples, rng, seed, progress, theta=0.8)
     if not scopes:
         raise RuntimeError("Target network has no constraints to supervise TO3.")
 
-    per_scope = max(50, int((n_samples / max(1, len(scopes)))))
-    rows, labels = [], []
+    cap_per_scope = max(20, int(n_samples / max(1, len(scopes))))
+    ENUM_LIMIT = 20000
 
+    # --- Stage 1: real constraint scopes -----------------------------------
+    rows, labels = [], []
     for si, (sc, rel) in enumerate(zip(scopes, scope_rel)):
         idxs = [var_index[v.name] for v in sc]
-        lb = min(int(v.get_bounds()[0]) for v in sc)
-        ub = max(int(v.get_bounds()[1]) for v in sc)
+        bounds = [(int(v.get_bounds()[0]), int(v.get_bounds()[1])) for v in sc]
+        dom_size = 1
+        for lo, hi in bounds:
+            dom_size *= (hi - lo + 1)
 
-        pos_bucket, neg_bucket = [], []
-        target_each = per_scope // 2
-        guard = 0
-        while (len(pos_bucket) < target_each or len(neg_bucket) < target_each) \
-                and guard < per_scope * 200:
-            guard += 1
-            for v in sc:
-                v._value = rng.randint(lb, ub)
-            label = 1 if all(check_value(c) for c in rel) else 0
-            tup = [int(v.value()) for v in sc]
-            if label == 1 and len(pos_bucket) < target_each:
-                pos_bucket.append(tup)
-            elif label == 0 and len(neg_bucket) < target_each:
-                neg_bucket.append(tup)
+        pos, neg = [], []
+        if dom_size <= ENUM_LIMIT:
+            for combo in itertools.product(*[range(lo, hi + 1) for lo, hi in bounds]):
+                for v, val in zip(sc, combo):
+                    v._value = int(val)
+                (pos if all(check_value(c) for c in rel) else neg).append(list(combo))
+        else:
+            target = cap_per_scope * 4
+            guard = 0
+            while (len(pos) < target or len(neg) < target) and guard < target * 50:
+                guard += 1
+                combo = [rng.randint(lo, hi) for lo, hi in bounds]
+                for v, val in zip(sc, combo):
+                    v._value = int(val)
+                (pos if all(check_value(c) for c in rel) else neg).append(list(combo))
 
-        # apply theta: keep a proportion of positives, with an equal number of negatives
-        keep = max(1, int(round(theta * max(len(pos_bucket), len(neg_bucket)))))
-        rng.shuffle(pos_bucket); rng.shuffle(neg_bucket)
-        for tup in pos_bucket[:keep]:
+        # keep a proportion theta of each class (independently)
+        rng.shuffle(pos); rng.shuffle(neg)
+        k_pos = min(len(pos), max(1, math.ceil(theta * len(pos))), cap_per_scope)
+        k_neg = min(len(neg), max(1, math.ceil(theta * len(neg))), cap_per_scope)
+        for combo in pos[:k_pos]:
             row = [0] * n
-            for i, val in zip(idxs, tup):
-                row[i] = val
+            for i, val in zip(idxs, combo):
+                row[i] = int(val)
             rows.append(row); labels.append(1)
-        for tup in neg_bucket[:keep]:
+        for combo in neg[:k_neg]:
             row = [0] * n
-            for i, val in zip(idxs, tup):
-                row[i] = val
+            for i, val in zip(idxs, combo):
+                row[i] = int(val)
             rows.append(row); labels.append(0)
 
-        if progress:
+        if progress and (si + 1) % 50 == 0:
             progress(f"TO3 scope {si + 1}/{len(scopes)}")
+
+    n_base = len(rows)
+
+    # --- Stage 2: neutral (non-constraint) examples ------------------------
+    # All binary pairs that participate in a constraint (directly or as a
+    # sub-pair of a larger scope) are excluded; the rest are non-constraint and
+    # any assignment on them is valid. Coverage is *systematic*: every
+    # non-constraint pair receives several examples (including equal values,
+    # which is exactly what FASTCA probes when violating a "!=" candidate), so
+    # the oracle reliably answers "valid" on non-target scopes during
+    # acquisition instead of hallucinating a constraint on every pair.
+    constrained_pairs = set()
+    for sc in scopes:
+        sidx = [var_index[v.name] for v in sc]
+        for a, b in itertools.combinations(sidx, 2):
+            constrained_pairs.add((min(a, b), max(a, b)))
+
+    unconstrained_pairs = [
+        (a, b) for a, b in itertools.combinations(range(n), 2)
+        if (a, b) not in constrained_pairs
+    ]
+    rng.shuffle(unconstrained_pairs)
+
+    made = 0
+    if unconstrained_pairs and non_constraint_ratio > 0:
+        n_neutral_target = int(n_base * non_constraint_ratio)
+        # at least a handful of examples per non-constraint pair
+        per_pair = max(4, math.ceil(n_neutral_target / len(unconstrained_pairs)))
+        dom = list(range(d_min, d_max + 1))
+        for (a, b) in unconstrained_pairs:
+            for _ in range(per_pair):
+                row = [0] * n
+                # bias half the examples toward EQUAL values (the FASTCA "!=" probe)
+                if rng.random() < 0.5:
+                    val = rng.choice(dom)
+                    row[a] = row[b] = val
+                else:
+                    row[a] = rng.choice(dom); row[b] = rng.choice(dom)
+                rows.append(row); labels.append(1)   # non-constraint pair -> valid
+                made += 1
+    if progress:
+        progress(f"TO3 neutral examples: {made} over {len(unconstrained_pairs)} pairs (base {n_base})")
+
+    # --- Stage 4: gentle balance -------------------------------------------
+    # Cap the majority class at MAJORITY_CAP x the minority so neither the
+    # neutral positives nor the constraint negatives are starved. A strict
+    # 50/50 cut would discard almost all neutral coverage on small benchmarks
+    # (where the target scopes admit very few violating tuples), which is what
+    # makes acquisition hallucinate a constraint on every pair.
+    MAJORITY_CAP = 5
+    pos_idx = [i for i, y in enumerate(labels) if y == 1]
+    neg_idx = [i for i, y in enumerate(labels) if y == 0]
+    if pos_idx and neg_idx:
+        if len(pos_idx) > MAJORITY_CAP * len(neg_idx):
+            pos_idx = rng.sample(pos_idx, MAJORITY_CAP * len(neg_idx))
+        elif len(neg_idx) > MAJORITY_CAP * len(pos_idx):
+            neg_idx = rng.sample(neg_idx, MAJORITY_CAP * len(pos_idx))
+        keep = pos_idx + neg_idx
+        rng.shuffle(keep)
+        rows = [rows[i] for i in keep]
+        labels = [labels[i] for i in keep]
     return rows, labels
-
-
-# --------------------------------------------------------------------------- #
 # public API
 # --------------------------------------------------------------------------- #
 def generate_dataset(name, scale=None, variant="TO3", n_samples=4000,
-                     seed=42, theta=0.8, progress=None):
+                     seed=42, theta=0.8, params=None, progress=None):
     """Generate a labelled dataset for ``(benchmark, variant)``.
 
+    :param params: optional constructor overrides for a parametric benchmark
+        (e.g. custom Sudoku dimensions); forwarded to ``build_benchmark``.
     :return: ``(DataFrame, meta)`` with columns ``var_0..var_{n-1}, label``.
              ``meta`` carries benchmark dimensions plus dataset statistics.
     """
@@ -236,7 +324,7 @@ def generate_dataset(name, scale=None, variant="TO3", n_samples=4000,
         raise ValueError(f"variant must be one of {VARIANTS}")
 
     rng = random.Random(seed)
-    instance, oracle, meta = build_benchmark(name, scale)
+    instance, oracle, meta = build_benchmark(name, scale, params=params)
     X = list(instance.X)
     d_min, d_max = meta["d_min"], meta["d_max"]
 

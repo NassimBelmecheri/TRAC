@@ -114,22 +114,41 @@ def default_scale(name: str) -> str:
     return "demo" if "demo" in scales else next(iter(scales))
 
 
-def build_benchmark(name: str, scale: str = None):
+# Benchmarks whose instance can be customised with user-supplied parameters.
+# name -> {"fn": constructor, "params": {arg: (label, default, min, max)}}
+PARAMETRIC = {
+    "sudoku": {
+        "fn": construct_sudoku,
+        "params": {
+            "block_size_row": ("Block rows", 2, 1, 4),
+            "block_size_col": ("Block cols", 2, 1, 4),
+            "grid_size":      ("Grid size (n×n)", 4, 4, 16),
+        },
+        "note": "For a valid Sudoku, block rows × block cols must equal the grid size "
+                "(e.g. 2×2→4, 2×3→6, 3×3→9, 3×4→12, 4×4→16).",
+    },
+}
+
+
+def build_benchmark(name: str, scale: str = None, params: dict = None):
     """Construct a benchmark instance.
 
+    :param params: optional constructor overrides for a parametric benchmark
+        (currently ``sudoku``); when given, ``scale`` is ignored.
     :return: ``(instance, oracle, meta)`` where ``meta`` holds derived
         dimensions used to size the model.
     """
     if name not in BENCHMARKS:
         raise KeyError(f"Unknown benchmark '{name}'. Available: {list(BENCHMARKS)}")
 
-    scales = BENCHMARKS[name]["scales"]
-    if scale is None:
-        scale = default_scale(name)
-    if scale not in scales:
-        scale = next(iter(scales))
-
-    instance, oracle = scales[scale]()
+    if params and name in PARAMETRIC:
+        instance, oracle = PARAMETRIC[name]["fn"](**params)
+        scale = "custom"
+    else:
+        scales = BENCHMARKS[name]["scales"]
+        if scale is None or scale not in scales:
+            scale = default_scale(name) if scale is None else next(iter(scales))
+        instance, oracle = scales[scale]()
 
     X = list(instance.X)
     n_vars = len(X)
@@ -147,5 +166,6 @@ def build_benchmark(name: str, scale: str = None):
         "d_max": d_max,
         "num_target_constraints": len(oracle.constraints),
         "num_target_scopes": len(target_scopes),
+        "params": params,
     }
     return instance, oracle, meta
