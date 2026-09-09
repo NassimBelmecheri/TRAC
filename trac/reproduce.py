@@ -332,7 +332,7 @@ def _get_or_train_oracle(b, v, scale, device, epochs, n_samples, theta, progress
 def rq3(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
         variants=("TO1", "TO2", "TO3"), scale=None, theta="0.8",
         time_limit=8, source="pretrained", epochs=120, n_samples=4000,
-        metric="exact", device=None, progress=None):
+        metric="exact", save_queries=False, device=None, progress=None):
     """Reproduce Table 3 (acquired-network quality for learner x oracle pairs).
 
     :param source: ``"pretrained"`` uses the shipped legacy checkpoints;
@@ -342,11 +342,16 @@ def rq3(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
     :param metric: ``"exact"`` (default, logical-equivalence match - the paper's
         metric), ``"implication"`` (learned implied by target), or ``"semantic"``
         (solution-based; note it is very strict on unique-solution puzzles).
+    :param save_queries: when True, write the membership queries generated during
+        each acquisition run to ``artifacts/results/queries/<bench>_<oracle>_<learner>.csv``.
     """
     device = device or utils.get_device()
     benchmarks = benchmarks or FAST_BENCHMARKS
     rows = []
     from .oracle import TransformerOracle
+    qdir = os.path.join(utils.RESULTS_DIR, "queries")
+    if save_queries:
+        os.makedirs(qdir, exist_ok=True)
     for b in benchmarks:
         for v in variants:
             try:
@@ -374,6 +379,14 @@ def rq3(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
                         instance.construct_bias()
                     learner_obj = _make_learner(lr, b, time_limit)
                     learner_obj.learn(instance, oracle, verbose=0)
+
+                    if save_queries:
+                        try:
+                            qpath = os.path.join(qdir, f"{b}_{v}_{lr}_queries.csv")
+                            learner_obj.env.metrics.save_dataset_to_csv(qpath)
+                        except Exception:
+                            pass
+
                     learned = learner_obj.env.instance.cl
                     if metric == "exact":
                         ev = evaluate_network_exact(learned, ground.constraints)
@@ -381,11 +394,12 @@ def rq3(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
                         ev = evaluate_network_semantic(learned, ground.constraints, instance.X)
                     else:
                         ev = evaluate_network(learned, ground.constraints)
+                    q = int(getattr(learner_obj.env.metrics, "membership_queries_count", 0))
                     rows.append({"benchmark": b, "oracle": v, "learner": lr,
                                  "accuracy": ev.get("accuracy"),
                                  "precision": ev["precision"], "recall": ev["recall"],
                                  "f1": ev["f1"], "learned": ev["n_learned"],
-                                 "target": ev["n_target"]})
+                                 "target": ev["n_target"], "queries": q})
                 except Exception as e:
                     rows.append({"benchmark": b, "oracle": v, "learner": lr,
                                  "result": f"err:{type(e).__name__}"})

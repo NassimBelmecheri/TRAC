@@ -105,8 +105,13 @@ def cmd_reproduce(a):
         df = R.rq2(benchmarks=bl, source=a.source, epochs=a.epochs,
                    generate_missing=a.generate_missing, progress=_p)
     elif a.rq == 3:
-        df = R.rq3(benchmarks=bl, source=a.source, epochs=a.epochs,
-                   time_limit=a.time_limit, progress=_p)
+        lrs = tuple(x.strip() for x in a.learners.split(",")) if a.learners else \
+              ("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq")
+        vrs = tuple(x.strip() for x in a.variants.split(",")) if a.variants else \
+              ("TO1", "TO2", "TO3")
+        df = R.rq3(benchmarks=bl, learners=lrs, variants=vrs, source=a.source,
+                   epochs=a.epochs, time_limit=a.time_limit, metric=a.metric,
+                   scale=a.scale, save_queries=a.save_queries, progress=_p)
     elif a.rq == 4:
         cons = [c.strip() for c in a.constraints.split(",")] if a.constraints else None
         df = R.rq4(constraints=cons, epochs=a.epochs, progress=_p)
@@ -174,6 +179,19 @@ def build_parser():
                          "corrected data generator")
     rp.add_argument("--generate_missing", action="store_true",
                     help="RQ2 only: synthesise data for benchmarks lacking a shipped dataset")
+    rp.add_argument("--learners", help="RQ3 only: comma-separated learners "
+                    "(default: FASTCA,QuAcq,MQuAcq2,GrowAcq)")
+    rp.add_argument("--variants", help="RQ3 only: comma-separated oracle variants "
+                    "(default: TO1,TO2,TO3)")
+    rp.add_argument("--metric", default="exact",
+                    choices=["exact", "implication", "semantic"],
+                    help="RQ3 only: network-quality metric (default: exact)")
+    rp.add_argument("--scale", default="paper",
+                    help="RQ3 only: benchmark scale (default: paper — matches the "
+                         "pretrained models)")
+    rp.add_argument("--save_queries", action="store_true",
+                    help="RQ3 only: save the queries generated during each "
+                         "acquisition run to artifacts/results/queries/")
     rp.add_argument("--epochs", type=int, default=60)
     rp.add_argument("--time_limit", type=int, default=8)
     rp.set_defaults(func=cmd_reproduce)
