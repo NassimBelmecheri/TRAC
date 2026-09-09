@@ -10,6 +10,7 @@ helpers (paths, device selection, seeding).
 """
 import os
 import sys
+import glob
 import random
 import warnings
 
@@ -18,6 +19,42 @@ import numpy as np
 # Silence a noisy (harmless) PyTorch prototype warning triggered by the
 # TransformerEncoder padding mask.
 warnings.filterwarnings("ignore", message=".*nested tensors.*")
+
+
+def _register_xpu_runtime():
+    """Make the Intel oneAPI/SYCL runtime DLLs discoverable before torch loads.
+
+    Intel Arc (XPU) builds of torch need the SYCL/DPC++ runtime (``sycl8.dll``
+    etc.) on the DLL search path. On systems where that runtime ships inside a
+    conda environment (e.g. an ``intel_extension_for_pytorch`` env) rather than
+    system-wide, torch fails to import with ``WinError 126``. We look for the
+    runtime and register it. The directory can be overridden with the
+    ``TRAC_XPU_RUNTIME`` environment variable.
+    """
+    if os.name != "nt":
+        return
+    candidates = []
+    env = os.environ.get("TRAC_XPU_RUNTIME")
+    if env:
+        candidates.append(env)
+    # Common conda-env locations that bundle the Intel GPU runtime.
+    home = os.path.expanduser("~")
+    candidates += glob.glob(os.path.join(
+        home, "AppData", "Local", "anaconda3", "envs", "*", "Library", "bin"))
+    candidates += glob.glob(os.path.join(
+        home, "AppData", "Local", "miniconda3", "envs", "*", "Library", "bin"))
+    for d in candidates:
+        if d and os.path.isfile(os.path.join(d, "sycl8.dll")):
+            try:
+                os.add_dll_directory(d)
+                os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            except Exception:
+                pass
+            return d
+    return None
+
+
+_register_xpu_runtime()
 
 # --- Path bootstrap ---------------------------------------------------------
 # .../<repo>/trac/utils.py
@@ -56,11 +93,15 @@ for _d in (DATA_DIR, MODELS_DIR, RESULTS_DIR):
 
 
 def get_device(prefer_gpu: bool = True) -> str:
-    """Return 'cuda' when available (and requested), else 'cpu'."""
+    """Return the best available accelerator: 'cuda' (NVIDIA), 'xpu' (Intel Arc),
+    else 'cpu'."""
     try:
         import torch
-        if prefer_gpu and torch.cuda.is_available():
-            return "cuda"
+        if prefer_gpu:
+            if torch.cuda.is_available():
+                return "cuda"
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                return "xpu"
     except Exception:
         pass
     return "cpu"
@@ -75,6 +116,8 @@ def set_seed(seed: int = 42) -> None:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
+        elif hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.manual_seed_all(seed)
     except Exception:
         pass
 
