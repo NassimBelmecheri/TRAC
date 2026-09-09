@@ -1,8 +1,9 @@
 # Reproducibility assets
 
 The pretrained **T-ORACLE checkpoints** and the per-variant **datasets** used to
-reproduce the paper's tables are **not** stored in this Git repository (~340 MB).
-They are hosted externally and downloaded into a local *assets root*.
+reproduce the paper's tables (the paper's original IJCAI assets, covering all
+benchmarks and the TO1/TO2/TO3 variants) are **not** stored in this Git
+repository. They are hosted externally and downloaded into a local *assets root*.
 
 ## Where to put them
 
@@ -24,11 +25,11 @@ Expected layout under that root:
 └── TO3/models/              # TO3 checkpoints
 ```
 
-## Download (Google Drive)
+## Download (Nextcloud)
 
-1. Download `trac_reproducibility_assets.zip` from:
+1. Download the reproducibility assets archive from:
 
-   **https://drive.google.com/drive/folders/1PjKlSwLgHWxvHn25auu9Qx5KPHXNLYSS?usp=sharing**
+   **https://nextcloud.lisn.upsaclay.fr/index.php/s/DCSAHyt5qpmxK2a**
 
 2. Extract it so the folders above sit directly inside your chosen assets root.
 

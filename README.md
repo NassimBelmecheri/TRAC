@@ -143,11 +143,11 @@ Each run writes a CSV to `artifacts/results/`.
 
 ### Pretrained checkpoints & datasets
 
-To reproduce the paper's **pretrained** numbers exactly, download the checkpoints
-and datasets (~340 MB, not stored in Git) and place them under an *assets root*:
+To reproduce the paper's **pretrained** numbers, download the paper's original
+(IJCAI) checkpoints and datasets — covering all benchmarks and the TO1/TO2/TO3
+variants — and place them under an *assets root*:
 
-- **Google Drive:** https://drive.google.com/drive/folders/1PjKlSwLgHWxvHn25auu9Qx5KPHXNLYSS?usp=sharing
-  (`trac_reproducibility_assets.zip`)
+- **Nextcloud:** https://nextcloud.lisn.upsaclay.fr/index.php/s/DCSAHyt5qpmxK2a
 - Extract into `reproducibility/` (the default location), or extract anywhere and
   set `TRAC_ASSETS=/path/to/assets`.
 - See [`reproducibility/README.md`](reproducibility/README.md) for the exact layout.
