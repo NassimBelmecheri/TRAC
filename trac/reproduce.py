@@ -31,7 +31,8 @@ from .predict import _predict_proba
 from .datagen import generate_dataset
 from .train import train_oracle
 from .benchmarks import build_benchmark
-from .acquire import _make_learner, evaluate_network
+from .acquire import (_make_learner, evaluate_network, evaluate_network_semantic,
+                      evaluate_network_exact)
 
 REPO = utils.REPO_ROOT
 
@@ -331,13 +332,16 @@ def _get_or_train_oracle(b, v, scale, device, epochs, n_samples, theta, progress
 def rq3(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
         variants=("TO1", "TO2", "TO3"), scale=None, theta="0.8",
         time_limit=8, source="pretrained", epochs=120, n_samples=4000,
-        device=None, progress=None):
+        metric="exact", device=None, progress=None):
     """Reproduce Table 3 (acquired-network quality for learner x oracle pairs).
 
     :param source: ``"pretrained"`` uses the shipped legacy checkpoints;
         ``"train"`` trains fresh oracles with the corrected data generator
         (needed to reproduce the paper's TO3 acquisition numbers, since the
         shipped checkpoints predate the data-generation fix).
+    :param metric: ``"exact"`` (default, logical-equivalence match - the paper's
+        metric), ``"implication"`` (learned implied by target), or ``"semantic"``
+        (solution-based; note it is very strict on unique-solution puzzles).
     """
     device = device or utils.get_device()
     benchmarks = benchmarks or FAST_BENCHMARKS
@@ -370,8 +374,15 @@ def rq3(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
                         instance.construct_bias()
                     learner_obj = _make_learner(lr, b, time_limit)
                     learner_obj.learn(instance, oracle, verbose=0)
-                    ev = evaluate_network(learner_obj.env.instance.cl, ground.constraints)
+                    learned = learner_obj.env.instance.cl
+                    if metric == "exact":
+                        ev = evaluate_network_exact(learned, ground.constraints)
+                    elif metric == "semantic":
+                        ev = evaluate_network_semantic(learned, ground.constraints, instance.X)
+                    else:
+                        ev = evaluate_network(learned, ground.constraints)
                     rows.append({"benchmark": b, "oracle": v, "learner": lr,
+                                 "accuracy": ev.get("accuracy"),
                                  "precision": ev["precision"], "recall": ev["recall"],
                                  "f1": ev["f1"], "learned": ev["n_learned"],
                                  "target": ev["n_target"]})
