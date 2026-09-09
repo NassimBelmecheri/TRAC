@@ -329,30 +329,162 @@ def _get_or_train_oracle(b, v, scale, device, epochs, n_samples, theta, progress
     return res["model_path"]
 
 
+def _run_learner_queries(benchmark, learner_name, scale, time_limit, oracle,
+                         construct_bias=True):
+    """Run ``learner_name`` on ``benchmark`` with the given ``oracle`` and return
+    a DataFrame of the membership queries it generated (var columns + ``label``,
+    where ``label`` is *that oracle's* answer)."""
+    instance, ground, meta = build_benchmark(benchmark, scale)
+    if construct_bias and len(instance.bias) == 0:
+        instance.construct_bias()
+    learner = _make_learner(learner_name, benchmark, time_limit)
+    learner.learn(instance, oracle, verbose=0)
+    buf = getattr(learner.env.metrics, "dataset_buffer", [])
+    df = pd.DataFrame(buf) if buf else pd.DataFrame()
+    return df, instance, ground
+
+
+def _true_labels_for_queries(df, benchmark, scale):
+    """Replace the ``label`` column with the *ground-truth* oracle's answer for
+    each query row (used for FASTCA, whose queries were labelled by the neural
+    oracle)."""
+    if df.empty:
+        return df
+    instance, ground, meta = build_benchmark(benchmark, scale)
+    X = list(instance.X)
+    cols = [c for c in df.columns if c != "label"]
+    vals = df[cols].values
+    labels = []
+    for row in vals:
+        visible = []
+        for v, val in zip(X, row):
+            if int(val) != 0:
+                v._value = int(val)
+                visible.append(v)
+        labels.append(1 if (visible and ground.answer_membership_query(visible)) else
+                      (1 if not visible else 0))
+    out = df.copy()
+    out["label"] = labels
+    return out
+
+
+def _classify_queries(model_path, df, device):
+    """Classify a query DataFrame with a neural oracle; return (acc, rec, prec, n)."""
+    from .predict import classify_dataset
+    if df is None or df.empty or "label" not in df.columns:
+        return None
+    res = classify_dataset(model_path, df, device=device)
+    o = res.get("overall")
+    if not o:
+        return None
+    return (round(100 * o["accuracy"]), round(100 * o["recall"]),
+            round(100 * o["precision"]), int(o["count"]))
+
+
+def _resample_scopes(query_df, benchmark, scale, samples_per_scope=50, seed=0):
+    """Build a balanced per-scope test set from the *scopes* a learner queried.
+
+    Mirrors the reference ``partial_generator.py``: take the unique variable
+    scopes appearing in the learner's queries and, for each, generate a balanced
+    set of valid/invalid partial assignments labelled by the ground-truth oracle.
+    This gives a robust test set even when the learner (with a perfect oracle)
+    converges in very few queries.
+    """
+    import random as _rnd
+    if query_df is None or query_df.empty:
+        return query_df
+    instance, ground, meta = build_benchmark(benchmark, scale)
+    X = list(instance.X)
+    n = len(X)
+    lb = min(int(v.get_bounds()[0]) for v in X)
+    ub = max(int(v.get_bounds()[1]) for v in X)
+    rng = _rnd.Random(seed)
+
+    cols = [c for c in query_df.columns if c != "label"]
+    scopes = set()
+    for row in query_df[cols].values:
+        idx = tuple(i for i, val in enumerate(row) if int(val) != 0)
+        if 1 <= len(idx) <= 6:
+            scopes.add(idx)
+    if not scopes:
+        return query_df
+
+    rows, labels = [], []
+    for idx in scopes:
+        pos, neg = [], []
+        guard = 0
+        target = samples_per_scope // 2
+        while (len(pos) < target or len(neg) < target) and guard < samples_per_scope * 40:
+            guard += 1
+            vis = []
+            for i in idx:
+                X[i]._value = rng.randint(lb, ub)
+                vis.append(X[i])
+            lbl = 1 if ground.answer_membership_query(vis) else 0
+            vec = [0] * n
+            for i in idx:
+                vec[i] = int(X[i].value())
+            (pos if lbl == 1 else neg).append(vec)
+        for vec in pos[:target] + neg[:target]:
+            rows.append(vec)
+        labels += [1] * len(pos[:target]) + [0] * len(neg[:target])
+
+    if not rows:
+        return query_df
+    out = pd.DataFrame(rows, columns=[f"var_{i}" for i in range(n)])
+    out["label"] = labels
+    return out
+
+
 def rq3(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
         variants=("TO1", "TO2", "TO3"), scale=None, theta="0.8",
         time_limit=8, source="pretrained", epochs=120, n_samples=4000,
-        metric="exact", save_queries=False, device=None, progress=None):
-    """Reproduce Table 3 (acquired-network quality for learner x oracle pairs).
+        save_queries=False, device=None, progress=None):
+    """Reproduce Table 3 as (Accuracy, Recall, Precision) per learner x oracle.
 
-    :param source: ``"pretrained"`` uses the shipped legacy checkpoints;
-        ``"train"`` trains fresh oracles with the corrected data generator
-        (needed to reproduce the paper's TO3 acquisition numbers, since the
-        shipped checkpoints predate the data-generation fix).
-    :param metric: ``"exact"`` (default, logical-equivalence match - the paper's
-        metric), ``"implication"`` (learned implied by target), or ``"semantic"``
-        (solution-based; note it is very strict on unique-solution puzzles).
-    :param save_queries: when True, write the membership queries generated during
-        each acquisition run to ``artifacts/results/queries/<bench>_<oracle>_<learner>.csv``.
+    Methodology (paper-faithful):
+      * The **classical** learners (QuAcq / MQuAcq2 / GrowAcq) are run with the
+        *ground-truth* oracle to generate a realistic query distribution; the
+        neural oracles (TO1/TO2/TO3) then **classify** those queries. The neural
+        model is NOT used as the acquisition oracle here.
+      * **FASTCA** is the exception: it is run with the *neural* oracle as the
+        actual oracle (the neuro-symbolic loop); the queries it asks are then
+        scored against the ground-truth answers.
+
+    Each cell reports the oracle's (Accuracy, Recall, Precision) on that learner's
+    queries.
+
+    :param source: ``"pretrained"`` uses shipped checkpoints; ``"train"`` retrains
+        oracles with the corrected data generator.
     """
     device = device or utils.get_device()
     benchmarks = benchmarks or FAST_BENCHMARKS
+    classical = [lr for lr in learners if lr != "FASTCA"]
     rows = []
     from .oracle import TransformerOracle
     qdir = os.path.join(utils.RESULTS_DIR, "queries")
     if save_queries:
         os.makedirs(qdir, exist_ok=True)
+
     for b in benchmarks:
+        # --- classical learners: run ONCE with the TRUE oracle (variant-independent)
+        classical_q = {}
+        for lr in classical:
+            try:
+                _, ground0, _ = build_benchmark(b, scale)
+                dfq, _, _ = _run_learner_queries(b, lr, scale, time_limit, ground0)
+                dfq = _resample_scopes(dfq, b, scale, samples_per_scope=50)
+                classical_q[lr] = dfq
+                if save_queries and dfq is not None and not dfq.empty:
+                    dfq.to_csv(os.path.join(qdir, f"{b}_{lr}_queries.csv"), index=False)
+                if progress:
+                    progress(f"  {b}/{lr}: {0 if dfq is None else len(dfq)} scope-samples (true oracle)")
+            except Exception as e:
+                classical_q[lr] = None
+                if progress:
+                    progress(f"  {b}/{lr}: query-gen err {type(e).__name__}")
+
+        # --- per oracle variant
         for v in variants:
             try:
                 if source == "train":
@@ -369,37 +501,31 @@ def rq3(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
 
             for lr in learners:
                 try:
-                    instance, ground, meta = build_benchmark(b, scale)
-                    if instance.X and load_checkpoint(mp, device=device)[1]["num_positions"] != len(instance.X):
-                        rows.append({"benchmark": b, "oracle": v, "learner": lr,
-                                     "result": "dim-mismatch"})
-                        continue
-                    oracle = TransformerOracle.from_checkpoint(mp, instance.X, device=device)
-                    if len(instance.bias) == 0:
-                        instance.construct_bias()
-                    learner_obj = _make_learner(lr, b, time_limit)
-                    learner_obj.learn(instance, oracle, verbose=0)
-
-                    if save_queries:
-                        try:
-                            qpath = os.path.join(qdir, f"{b}_{v}_{lr}_queries.csv")
-                            learner_obj.env.metrics.save_dataset_to_csv(qpath)
-                        except Exception:
-                            pass
-
-                    learned = learner_obj.env.instance.cl
-                    if metric == "exact":
-                        ev = evaluate_network_exact(learned, ground.constraints)
-                    elif metric == "semantic":
-                        ev = evaluate_network_semantic(learned, ground.constraints, instance.X)
+                    if lr == "FASTCA":
+                        # run FASTCA with the NEURAL oracle (the neuro-symbolic loop),
+                        # then score its queries against the ground truth.
+                        inst_f, ground_f, _ = build_benchmark(b, scale)
+                        if len(inst_f.bias) == 0:
+                            inst_f.construct_bias()
+                        neural = TransformerOracle.from_checkpoint(mp, inst_f.X, device=device)
+                        flearner = _make_learner("FASTCA", b, time_limit)
+                        flearner.learn(inst_f, neural, verbose=0)
+                        buf = getattr(flearner.env.metrics, "dataset_buffer", [])
+                        dfq = pd.DataFrame(buf) if buf else pd.DataFrame()
+                        dfq = _true_labels_for_queries(dfq, b, scale)
+                        if save_queries and not dfq.empty:
+                            dfq.to_csv(os.path.join(qdir, f"{b}_{v}_FASTCA_queries.csv"), index=False)
                     else:
-                        ev = evaluate_network(learned, ground.constraints)
-                    q = int(getattr(learner_obj.env.metrics, "membership_queries_count", 0))
-                    rows.append({"benchmark": b, "oracle": v, "learner": lr,
-                                 "accuracy": ev.get("accuracy"),
-                                 "precision": ev["precision"], "recall": ev["recall"],
-                                 "f1": ev["f1"], "learned": ev["n_learned"],
-                                 "target": ev["n_target"], "queries": q})
+                        dfq = classical_q.get(lr)
+
+                    m = _classify_queries(mp, dfq, device)
+                    if m is None:
+                        rows.append({"benchmark": b, "oracle": v, "learner": lr,
+                                     "result": "no-queries"})
+                    else:
+                        rows.append({"benchmark": b, "oracle": v, "learner": lr,
+                                     "accuracy": m[0], "recall": m[1],
+                                     "precision": m[2], "n_queries": m[3]})
                 except Exception as e:
                     rows.append({"benchmark": b, "oracle": v, "learner": lr,
                                  "result": f"err:{type(e).__name__}"})

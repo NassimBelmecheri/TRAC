@@ -42,7 +42,9 @@ class FindC(FindCBase):
             return c
 
         if len(delta) == 0:
-            raise Exception(f"Collapse, the constraint we seek is not in B: {get_kappa(self.ca.oracle.constraints,scope)}")
+            _cons = getattr(self.ca.oracle, "constraints", None)
+            _info = get_kappa(_cons, scope) if _cons is not None else "(neural oracle)"
+            raise Exception(f"Collapse, the constraint we seek is not in B: {_info}")
         # We need to take into account only the constraints in the scope we search on
         sub_cl = get_con_subset(self.ca.instance.cl, scope)
 

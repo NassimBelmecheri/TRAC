@@ -110,7 +110,7 @@ def cmd_reproduce(a):
         vrs = tuple(x.strip() for x in a.variants.split(",")) if a.variants else \
               ("TO1", "TO2", "TO3")
         df = R.rq3(benchmarks=bl, learners=lrs, variants=vrs, source=a.source,
-                   epochs=a.epochs, time_limit=a.time_limit, metric=a.metric,
+                   epochs=a.epochs, time_limit=a.time_limit,
                    scale=a.scale, save_queries=a.save_queries, progress=_p)
     elif a.rq == 4:
         cons = [c.strip() for c in a.constraints.split(",")] if a.constraints else None
