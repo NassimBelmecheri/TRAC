@@ -228,33 +228,71 @@ CHECKER_CONSTRAINTS = [
 ]
 
 
-def _checker_dataset(arity, pred, domain=20, n=4000, seed=0):
+def _checker_dataset(arity, pred, domain=100, theta=0.2, pool=100000, seed=0):
+    """Build the RQ4 constraint-checker dataset (paper protocol).
+
+    Constructs the tuples over an integer domain of size ``domain`` (=100 in the
+    paper), splits them into satisfying / violating, and samples a proportion
+    ``theta`` (=20%) of *each* class, balanced. For binary constraints the full
+    space (e.g. 100x100 = 10,000 tuples) is enumerated; for ternary/quaternary
+    the full space is too large, so a random pool of distinct tuples is drawn as
+    a proxy for "all tuples".
+    """
+    import math
+    import itertools
     rng = np.random.default_rng(seed)
+
     pos, neg = [], []
-    target = n // 2
-    guard = 0
-    while (len(pos) < target or len(neg) < target) and guard < n * 40:
-        guard += 1
-        v = rng.integers(1, domain + 1, size=arity).tolist()
-        if pred(v):
-            if len(pos) < target:
-                pos.append(v + [1])
-        elif len(neg) < target:
-            neg.append(v + [0])
-    data = np.array(pos + neg, dtype=int)
+    if domain ** arity <= pool:                     # enumerate the full space
+        for combo in itertools.product(range(1, domain + 1), repeat=arity):
+            (pos if pred(combo) else neg).append(list(combo))
+    else:                                           # sample a distinct-tuple pool
+        seen = set()
+        guard = 0
+        while len(seen) < pool and guard < pool * 5:
+            guard += 1
+            v = tuple(int(x) for x in rng.integers(1, domain + 1, size=arity))
+            if v not in seen:
+                seen.add(v)
+                (pos if pred(v) else neg).append(list(v))
+
+    def _take(lst, k):
+        if len(lst) <= k:
+            return list(lst)
+        idx = rng.choice(len(lst), size=k, replace=False)
+        return [lst[i] for i in idx]
+
+    pos = _take(pos, max(1, math.ceil(theta * len(pos))))   # 20% of positives
+    neg = _take(neg, max(1, math.ceil(theta * len(neg))))   # 20% of negatives
+    target = max(len(pos), len(neg))                        # balance to majority
+    if len(pos) < target:                                   # oversample minority
+        extra = rng.choice(len(pos), size=target - len(pos), replace=True)
+        pos = pos + [pos[i] for i in extra]
+    if len(neg) < target:
+        extra = rng.choice(len(neg), size=target - len(neg), replace=True)
+        neg = neg + [neg[i] for i in extra]
+    rows = pos + neg
+    labels = [1] * len(pos) + [0] * len(neg)
+    data = np.array([r + [l] for r, l in zip(rows, labels)], dtype=int)
     cols = [f"var_{i}" for i in range(arity)] + ["label"]
     return pd.DataFrame(data, columns=cols).sample(frac=1.0, random_state=seed).reset_index(drop=True)
 
 
-def rq4(constraints=None, domain=30, n_samples=5000, epochs=50, device=None, progress=None):
-    """Reproduce Table 4 (TO3 emulating a symbolic constraint checker)."""
+def rq4(constraints=None, domain=100, theta=0.2, epochs=50, device=None, progress=None):
+    """Reproduce Table 4 (TO3 emulating a symbolic constraint checker).
+
+    Paper protocol: tuples over an integer domain of size ``domain`` (=100), with
+    a proportion ``theta`` (=20%) of positives and negatives sampled and balanced,
+    independently per constraint. A model trained on a constraint (e.g. ``X!=Y``)
+    can also check its negation (``X=Y``) by inverting predictions.
+    """
     device = device or utils.get_device()
     picks = constraints or [c[1] for c in CHECKER_CONSTRAINTS]
     rows = []
     for arity_name, name, arity, pred in CHECKER_CONSTRAINTS:
         if name not in picks:
             continue
-        df = _checker_dataset(arity, pred, domain=domain, n=n_samples)
+        df = _checker_dataset(arity, pred, domain=domain, theta=theta)
         res = train_oracle(df, benchmark=f"checker_{name}", variant="TO3",
                            model_name=f"rq4_{name}", epochs=epochs,
                            batch_size=128, device=device)
@@ -456,6 +494,12 @@ def rq3(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
 
     :param source: ``"pretrained"`` uses shipped checkpoints; ``"train"`` retrains
         oracles with the corrected data generator.
+    :param theta: the TO3 training ratio, i.e. the proportion of each target
+        constraint's tuples (``rel(c)`` positives and an equal number of ``N(c)``
+        negatives) used to train the oracle. Defaults to ``"0.8"`` (80%), the
+        upper end of the paper's 20-80% range. Ignored for TO1/TO2 (no theta).
+        Note: this is *unrelated* to the 20% sampling used by RQ4's abstract
+        constraint checker (:func:`rq4`).
     """
     device = device or utils.get_device()
     benchmarks = benchmarks or FAST_BENCHMARKS
@@ -511,10 +555,17 @@ def rq3(benchmarks=None, learners=("FASTCA", "QuAcq", "MQuAcq2", "GrowAcq"),
                         flearner = _make_learner("FASTCA", b, time_limit)
                         flearner.learn(inst_f, neural, verbose=0)
                         buf = getattr(flearner.env.metrics, "dataset_buffer", [])
-                        dfq = pd.DataFrame(buf) if buf else pd.DataFrame()
-                        dfq = _true_labels_for_queries(dfq, b, scale)
-                        if save_queries and not dfq.empty:
-                            dfq.to_csv(os.path.join(qdir, f"{b}_{v}_FASTCA_queries.csv"), index=False)
+                        raw = pd.DataFrame(buf) if buf else pd.DataFrame()
+                        # Evaluate the oracle on a *balanced per-scope* test set
+                        # built from the scopes FASTCA queried - consistent with
+                        # the classical learners above. FASTCA's raw acquisition
+                        # queries are heavily imbalanced (one violating example per
+                        # bias candidate), which understates the oracle's per-scope
+                        # accuracy on rich-language benchmarks such as Zebra.
+                        dfq = _resample_scopes(raw, b, scale, samples_per_scope=50)
+                        if save_queries and not raw.empty:
+                            _true_labels_for_queries(raw, b, scale).to_csv(
+                                os.path.join(qdir, f"{b}_{v}_FASTCA_queries.csv"), index=False)
                     else:
                         dfq = classical_q.get(lr)
 

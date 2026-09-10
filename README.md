@@ -123,13 +123,28 @@ letting FASTCA run with the neural oracle in place of a human.
 ## Reproducing the paper (RQ1–RQ4)
 
 The **⑤ Reproduce** UI tab and the `reproduce` CLI command regenerate the paper's
-four result tables over the paper's 10 benchmarks.
+four result tables (Tables 1–4) over the paper's 10 benchmarks. Each run prints the
+table and writes a CSV to `artifacts/results/rq<N>_results.csv`.
+
+### Run it
 
 ```bash
-python cli.py reproduce --rq 2                       # Table 2 (oracle classification)
-python cli.py reproduce --rq 1 --benchmarks murder,zebra   # Table 1 (learner efficiency)
-python cli.py reproduce --rq 3 --benchmarks murder,zebra   # Table 3 (learner × oracle)
-python cli.py reproduce --rq 4 --constraints "X!=Y,X+Y>Z"  # Table 4 (constraint checker)
+# full tables
+python cli.py reproduce --rq 1                              # Table 1  (learner efficiency)
+python cli.py reproduce --rq 2                              # Table 2  (oracle classification)
+python cli.py reproduce --rq 3                              # Table 3  (learner × oracle)
+python cli.py reproduce --rq 4                              # Table 4  (constraint checker)
+
+# scope a run to specific benchmarks / constraints / learners
+python cli.py reproduce --rq 3 --benchmarks murder,zebra --learners FASTCA --variants TO3
+python cli.py reproduce --rq 4 --constraints "X!=Y,X+Y>Z"
+```
+
+Equivalently from Python:
+
+```python
+from trac import rq1, rq2, rq3, rq4
+rq3(benchmarks=["zebra"], learners=("FASTCA",), variants=("TO3",)).to_csv("rq3.csv")
 ```
 
 | RQ | Question | Table | Function |
@@ -139,21 +154,39 @@ python cli.py reproduce --rq 4 --constraints "X!=Y,X+Y>Z"  # Table 4 (constraint
 | RQ3 | How do learner × oracle pairings perform? | 3 | `trac.rq3` |
 | RQ4 | Can TO3 emulate a symbolic constraint checker? | 4 | `trac.rq4` |
 
-Each run writes a CSV to `artifacts/results/`.
+### Two modes: train-from-scratch vs. pretrained
 
-### Pretrained checkpoints & datasets
+RQ2 and RQ3 accept `--source`:
 
-To reproduce the paper's **pretrained** numbers, download the paper's original
-(IJCAI) checkpoints and datasets — covering all benchmarks and the TO1/TO2/TO3
-variants — and place them under an *assets root*:
+- **`--source train`** — *no external assets required*. The platform **generates**
+  each dataset with the corrected, constraint-type-balanced generator and **trains**
+  a fresh oracle on the fly, then runs the experiment. This reproduces the paper
+  end-to-end from source:
 
-- **Nextcloud:** https://nextcloud.lisn.upsaclay.fr/index.php/s/DCSAHyt5qpmxK2a
-- Extract into `reproducibility/` (the default location), or extract anywhere and
-  set `TRAC_ASSETS=/path/to/assets`.
-- See [`reproducibility/README.md`](reproducibility/README.md) for the exact layout.
+  ```bash
+  python cli.py reproduce --rq 2 --source train
+  python cli.py reproduce --rq 3 --source train --benchmarks zebra --variants TO3 --learners FASTCA
+  ```
 
-Without these assets the platform still runs end to end — it simply **generates**
-data and **trains** fresh models on the fly.
+- **`--source pretrained`** (default) — reuse ready-made per-variant datasets and
+  `.pth` checkpoints for speed. Place them under an *assets root* and point
+  `TRAC_ASSETS` at it (see [`reproducibility/README.md`](reproducibility/README.md)
+  for the exact directory layout):
+
+  ```bash
+  export TRAC_ASSETS=/path/to/assets            # Windows: $env:TRAC_ASSETS="C:\path\to\assets"
+  python cli.py reproduce --rq 2 --source pretrained
+  ```
+
+  Use `--generate_missing` (RQ2) to synthesise any benchmark that has no shipped
+  dataset.
+
+### Accelerator (optional)
+
+Oracle **training** is batched and uses an accelerator automatically when available
+— CUDA, or Intel **XPU** (`torch-xpu`); otherwise CPU. The FASTCA **acquisition**
+loop issues single membership queries, runs on CPU (lowest per-query latency), and
+is **solver-free**, so even the largest benchmarks finish in minutes.
 
 ---
 

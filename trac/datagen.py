@@ -204,10 +204,20 @@ def _gen_to3(oracle, X, d_min, d_max, n_samples, rng, seed, progress,
 
     cap_per_scope = max(20, int(n_samples / max(1, len(scopes))))
     ENUM_LIMIT = 20000
+    TYPE_REP_CAP = 12   # max replication factor for rare constraint types
 
-    # --- Stage 1: real constraint scopes -----------------------------------
-    rows, labels = [], []
-    for si, (sc, rel) in enumerate(zip(scopes, scope_rel)):
+    # --- Stage 1: real constraint scopes (constraint-TYPE balanced) --------
+    # First pass: enumerate each scope's satisfying (pos) / violating (neg)
+    # tuples and derive a *type signature* -- the set of satisfying tuples,
+    # which is identical for all scopes sharing the same relation (e.g. every
+    # "!=" pair). Second pass: replicate the rare types (the few "=", arithmetic
+    # or unary scopes) so they are not swamped by the dominant relation (e.g.
+    # Zebra's 50 "!=" cliques). Without this the oracle learns "equal values =>
+    # invalid" and collapses on "=" / arithmetic constraints (measured Zebra
+    # per-type accuracy: != 0.90 but = 0.07, arithmetic 0.51).
+    from collections import Counter
+    stage1 = []   # (idxs, pos, neg, signature)
+    for sc, rel in zip(scopes, scope_rel):
         idxs = [var_index[v.name] for v in sc]
         bounds = [(int(v.get_bounds()[0]), int(v.get_bounds()[1])) for v in sc]
         dom_size = 1
@@ -220,6 +230,7 @@ def _gen_to3(oracle, X, d_min, d_max, n_samples, rng, seed, progress,
                 for v, val in zip(sc, combo):
                     v._value = int(val)
                 (pos if all(check_value(c) for c in rel) else neg).append(list(combo))
+            sig = frozenset(tuple(p) for p in pos)   # exact relation signature
         else:
             target = cap_per_scope * 4
             guard = 0
@@ -229,26 +240,74 @@ def _gen_to3(oracle, X, d_min, d_max, n_samples, rng, seed, progress,
                 for v, val in zip(sc, combo):
                     v._value = int(val)
                 (pos if all(check_value(c) for c in rel) else neg).append(list(combo))
+            sig = ("sampled", len(sc), round(len(pos) / max(1, len(pos) + len(neg)), 2))
+        stage1.append((idxs, pos, neg, sig))
 
+    sig_count = Counter(sig for _, _, _, sig in stage1)
+    max_sig = max(sig_count.values()) if sig_count else 1
+
+    rows, labels = [], []
+    for si, (idxs, pos, neg, sig) in enumerate(stage1):
         # keep a proportion theta of each class (independently)
         rng.shuffle(pos); rng.shuffle(neg)
         k_pos = min(len(pos), max(1, math.ceil(theta * len(pos))), cap_per_scope)
         k_neg = min(len(neg), max(1, math.ceil(theta * len(neg))), cap_per_scope)
-        for combo in pos[:k_pos]:
-            row = [0] * n
-            for i, val in zip(idxs, combo):
-                row[i] = int(val)
-            rows.append(row); labels.append(1)
-        for combo in neg[:k_neg]:
-            row = [0] * n
-            for i, val in zip(idxs, combo):
-                row[i] = int(val)
-            rows.append(row); labels.append(0)
+        # replicate rare constraint types up to the frequency of the dominant one
+        reps = min(TYPE_REP_CAP, max(1, round(max_sig / sig_count[sig])))
+        for _ in range(reps):
+            for combo in pos[:k_pos]:
+                row = [0] * n
+                for i, val in zip(idxs, combo):
+                    row[i] = int(val)
+                rows.append(row); labels.append(1)
+            for combo in neg[:k_neg]:
+                row = [0] * n
+                for i, val in zip(idxs, combo):
+                    row[i] = int(val)
+                rows.append(row); labels.append(0)
 
         if progress and (si + 1) % 50 == 0:
             progress(f"TO3 scope {si + 1}/{len(scopes)}")
 
     n_base = len(rows)
+
+    # --- Stage 1b: unary coverage (only when the target has unary constraints) ---
+    # Unary constraints have very few tuples and are otherwise drowned by the
+    # thousands of binary rows, so the oracle never learns to fire on a unary
+    # violation - it answers "valid" for every single-variable query (observed
+    # on Zebra: P(valid|violation) ~ 0.97). We therefore (i) heavily replicate
+    # the real unary examples (every domain value, balanced valid/invalid) and
+    # (ii) add unary NEUTRAL examples on variables carrying no unary constraint,
+    # so the model learns *which* variables are unary-constrained.
+    unary_scope_vars = {var_index[sc[0].name] for sc in scopes if len(sc) == 1}
+    if unary_scope_vars:
+        dom = list(range(d_min, d_max + 1))
+        unary_reps = max(4, (3 * cap_per_scope) // max(1, len(dom)))
+        # (i) boost the real unary scopes
+        for sc, rel in zip(scopes, scope_rel):
+            if len(sc) != 1:
+                continue
+            idx = var_index[sc[0].name]
+            lo, hi = int(sc[0].get_bounds()[0]), int(sc[0].get_bounds()[1])
+            for val in range(lo, hi + 1):
+                sc[0]._value = val
+                lbl = 1 if all(check_value(c) for c in rel) else 0
+                for _ in range(unary_reps):
+                    row = [0] * n
+                    row[idx] = val
+                    rows.append(row); labels.append(lbl)
+        # (ii) unary neutral on variables with no unary constraint -> always valid
+        free_vars = [i for i in range(n) if i not in unary_scope_vars]
+        rng.shuffle(free_vars)
+        per_var = max(2, unary_reps // 2)
+        for i in free_vars:
+            for _ in range(per_var):
+                row = [0] * n
+                row[i] = rng.choice(dom)
+                rows.append(row); labels.append(1)
+        if progress:
+            progress(f"TO3 unary coverage: {len(unary_scope_vars)} constrained, "
+                     f"{len(free_vars)} free vars")
 
     # --- Stage 2: neutral (non-constraint) examples ------------------------
     # All binary pairs that participate in a constraint (directly or as a

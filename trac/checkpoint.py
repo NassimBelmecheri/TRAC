@@ -12,6 +12,7 @@ or *inspect tensor shapes* to guess ``n_vars`` / ``grid_size``.
 """
 import json
 import os
+import time
 
 import torch
 
@@ -19,9 +20,28 @@ from .model import build_model
 
 
 def save_checkpoint(model, path_pth, config: dict):
-    """Save ``model`` weights to ``path_pth`` and ``config`` to the sibling JSON."""
+    """Save ``model`` weights to ``path_pth`` and ``config`` to the sibling JSON.
+
+    Robust to (a) accelerator tensors - the ``state_dict`` is moved to CPU first,
+    and (b) transient Windows file locks (e.g. an AV/indexer scanning the freshly
+    written ``.pth`` between the repeated best-model saves during training) - the
+    weights are written to a temp file and atomically renamed, with retries.
+    """
     os.makedirs(os.path.dirname(os.path.abspath(path_pth)), exist_ok=True)
-    torch.save(model.state_dict(), path_pth)
+    state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+    tmp = path_pth + ".tmp"
+    last = None
+    for _ in range(6):
+        try:
+            torch.save(state, tmp)
+            os.replace(tmp, path_pth)
+            last = None
+            break
+        except (OSError, RuntimeError) as e:
+            last = e
+            time.sleep(0.5)
+    if last is not None:
+        raise last
     with open(_json_path(path_pth), "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
 

@@ -78,8 +78,11 @@ class BruteCA(AlgorithmCAInteractive):
                     
                     scope_vars = get_scope(c)
                     
-                    # Run FindC to find the EXACT constraint on this scope
-                    learned_c = self.env.run_findc(scope_vars)
+                    # Run FindC to find the EXACT constraint on this scope.
+                    # We use BruteCA's own solver-free FindC (findc_bruteca),
+                    # inspired by the QuAcq2 `find_con` loop, instead of the
+                    # environment's default solver-based FindC.
+                    learned_c = self.findc_bruteca(scope_vars)
 
                     if learned_c is not None:
                         # 1. Add to learned network
@@ -116,19 +119,23 @@ class BruteCA(AlgorithmCAInteractive):
         self.env.metrics.finalize_statistics()
 
 
-    def _generate_violation(self, target_c, X, max_random_tries=2000, time_limit=0.5):
+    def _generate_violation(self, target_c, X, max_random_tries=2000):
         """
-        Generate a query e that VIOLATES target_c while SATISFYING the learned
-        network L on the scope (paper Algorithm 1: "generate e that satisfies L
-        and violates c").
+        Generate a query e that VIOLATES target_c, using ONLY random sampling on
+        the scope - no constraint solver anywhere (the original FASTCA generator).
 
-        Respecting L is essential for soundness: without it, a random assignment
-        that violates target_c may also violate an already-learned sub-scope
-        constraint (e.g. a unary constraint on one of the scope variables), and
-        the oracle's negative answer would be misattributed to target_c's scope.
+        We draw random values on the scope variables until the assignment
+        violates target_c. Violating a single candidate constraint on its own
+        scope is easy (a violation practically always exists and is hit within a
+        handful of tries), so this is fast and never invokes a CP solver. The
+        ``max_random_tries`` bound is only a safety net; if it is exhausted the
+        candidate is dropped from the bias.
 
-        Returns the scope args (with violating values set) or an empty list when
-        no violation exists (target_c is implied by L -> remove it from the bias).
+        Note: this intentionally does NOT constrain the sample to satisfy the
+        learned network L on the scope. That keeps the loop cheap (one constraint
+        evaluation per try). If strict L-respecting generation is ever needed
+        (e.g. to avoid over-acquisition under a perfect oracle), it should be
+        added as an opt-in, not via a solver in this hot loop.
         """
         if X is None:
             X = self.env.instance.X
@@ -139,90 +146,65 @@ class BruteCA(AlgorithmCAInteractive):
         # Bounds (assuming uniform domains; grab from first var)
         lb, ub = scope_vars[0].get_bounds()
 
-        # Constraints already learned on this scope: the counter-example must satisfy them.
-        sub_cl = get_con_subset(self.env.instance.cl, scope_vars)
-
-        # --- STRATEGY 1: RANDOM SAMPLING ON SCOPE (bounded, L-respecting) ---
-        start = time.time()
+        # --- RANDOM SAMPLING ON SCOPE (bounded) - NO SOLVER ---
         for _ in range(max_random_tries):
             for v in scope_vars:
                 v._value = int(random.randint(lb, ub))
-            # Want: violates target_c AND satisfies every learned constraint on the scope
-            if not target_c.value() and all(check_value(c) for c in sub_cl):
+            if not target_c.value():
                 return target_c._args
-            if time.time() - start > time_limit:
-                break
 
-        # --- STRATEGY 2: CP FALLBACK (satisfy L on the scope, violate target_c) ---
-        # Bounded by ``time_limit`` so a hard/large sub-problem cannot stall the
-        # whole acquisition loop (critical on large-bias benchmarks such as
-        # job_shop / random495 where an unbounded solve can hang for minutes).
-        try:
-            m = cp.Model(list(sub_cl))
-            m += ~target_c
-            if m.solve(time_limit=max(0.5, time_limit)):
-                return target_c._args
-        except Exception:
-            pass
-
-        # --- No violation possible: target_c is implied by L, signal "no query" ---
+        # --- No violation found within the budget: drop the candidate ---
         return []
 
             
             
-    def generate_findc_query(self, L, delta,time_limit=0.2):
+    def generate_findc_query(self, L, delta, max_tries=2000):
         """
-        Generate a findc query.
+        Generate a FindC discriminating example by RANDOM sampling - NO solver.
 
-        Constraints from B are taken into account as soft constraints.
-        The objective function used is the one presented in the same paper, doing a dichotomy search on delta.
-        Changes directly the values of the variables.
+        Draw random values on the scope until the assignment (i) satisfies the
+        learned network L on the scope and (ii) satisfies at least one but not
+        all candidates in ``delta`` (so the oracle's answer strictly reduces
+        ``delta``). Values are set in place on the scope variables, mirroring the
+        contract of the original solver-based generator.
 
         :param L: Learned network in the given scope.
         :param delta: Candidate constraints in the given scope.
-        :return: Boolean value representing a success or failure on the generation.
+        :return: True if a discriminating example was set, else False.
         """
-        tmp = cp.Model(L)
-
-        sat = sum([c for c in delta])  # Get the amount of satisfied constraints from B
-
-        # At least 1 violated and at least 1 satisfied:
-        # We want this to assure that each answer of the user will reduce the set of candidates
-        # If all are violated, we already know that the example will be a non-solution due to previous answers!
-        tmp += sat < len(delta)
-        tmp += sat > 0
-
-        # Try first without objective
-        s = cp.SolverLookup.get("ortools", tmp)
-        flag = s.solve()
-
-        if not flag:
-            # UNSAT, stop here
-            return False
-
         Y = get_scope(delta[0])
-        Y = list(dict.fromkeys(Y))  # Remove duplicates
+        Y = list(dict.fromkeys(Y))  # unique scope variables
+        bounds = [v.get_bounds() for v in Y]
+        saved = [v.value() for v in Y]
+        n = len(delta)
 
-        # Next solve will change the values of the variables in the lY2
-        # So we need to return them to the original ones to continue if we don't find a solution next
-        values = [x.value() for x in Y]
+        for _ in range(max_tries):
+            for v, (lb, ub) in zip(Y, bounds):
+                v._value = int(random.randint(int(lb), int(ub)))
+            # (i) respect the learned network on the scope
+            if not all(check_value(c) is not False for c in L):
+                continue
+            # (ii) satisfy at least one but not all candidates in delta
+            n_sat = sum(1 for c in delta if check_value(c) is not False)
+            if 0 < n_sat < n:
+                return True
 
-        # So a solution was found, try to find a better one now
-        s.solution_hint(Y, values)
+        # No discriminating example found - restore values and signal failure
+        restore_scope_values(Y, saved)
+        return False
+    def findc_bruteca(self, scope):
+        """Solver-free FindC for a confirmed scope (inspired by QuAcq2 ``find_con``).
 
-        objective = findc_obj_splithalf(sat, delta, ca_env=self.env)
-        # Run with the objective
-        s.maximize(objective)  # We want to try and do it like a dichotomic search
-
-        flag2 = s.solve(time_limit)
-
-        if not flag2:
-            restore_scope_values(Y, values)
-            return flag
-
-        else:
-            return flag2
-    def findc_bruteca(self,scope):
+        ``delta`` is the set of bias constraints on ``scope`` that are violated by
+        the current (invalid) example - the candidates for the real constraint.
+        We repeatedly generate a discriminating example that respects the learned
+        network and satisfies some-but-not-all of ``delta`` (via random sampling,
+        no solver), ask the oracle, and shrink ``delta``: on a YES answer the
+        violated candidates are removed, on a NO answer only the violated ones are
+        kept. When no discriminator can be found the survivors are equivalent
+        w.r.t. C_L, so any one is returned. Returns the learned constraint, or
+        ``None`` to signal a graceful collapse (candidate not in the bias).
+        """
         # Initialize delta
         delta = get_con_subset(self.env.instance.bias, scope)
         delta = [c for c in delta if check_value(c) is False]

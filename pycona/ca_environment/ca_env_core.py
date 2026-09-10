@@ -73,7 +73,13 @@ class CAEnv(ABC):
         if self.verbose >= 3:
             print(f"removing the following constraints from bias: {C}")
 
-        self.instance.bias = list(set(self.instance.bias) - set(C))
+        # Fast path: filter by object identity instead of rebuilding a set of the
+        # whole bias (which would call cpmpy's expensive Expression.__hash__ on
+        # every candidate on every removal - O(n) hashing per call, O(n^2) over a
+        # full acquisition). All callers remove constraints taken *from* the bias,
+        # so identity is sufficient and correct.
+        remove_ids = {id(c) for c in C}
+        self.instance.bias = [c for c in self.instance.bias if id(c) not in remove_ids]
 
     def add_to_cl(self, C):
         """
@@ -90,7 +96,8 @@ class CAEnv(ABC):
 
         # Add constraint(s) c to the learned network and remove them from the bias
         self.instance.cl.extend(C)
-        self.instance.bias = list(set(self.instance.bias) - set(C))
+        remove_ids = {id(c) for c in C}
+        self.instance.bias = [c for c in self.instance.bias if id(c) not in remove_ids]
 
         self.metrics.cl += len(C)
         if self.verbose == 1:

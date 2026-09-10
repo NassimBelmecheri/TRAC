@@ -3,7 +3,7 @@
 The pretrained **T-ORACLE checkpoints** and the per-variant **datasets** used to
 reproduce the paper's tables (the paper's original IJCAI assets, covering all
 benchmarks and the TO1/TO2/TO3 variants) are **not** stored in this Git
-repository. They are hosted externally and downloaded into a local *assets root*.
+repository. They are provided separately and placed into a local *assets root*.
 
 ## Where to put them
 
@@ -25,31 +25,28 @@ Expected layout under that root:
 └── TO3/models/              # TO3 checkpoints
 ```
 
-## Download (Nextcloud)
+## Providing the assets
 
-1. Download the reproducibility assets archive from:
+These assets are **optional** — with `--source train` the platform generates the
+datasets and trains the oracles from scratch, so no download is required (see the
+main README).
 
-   **https://nextcloud.lisn.upsaclay.fr/index.php/s/DCSAHyt5qpmxK2a**
+To reproduce the *pretrained* numbers exactly, obtain the paper's original IJCAI
+checkpoints and datasets, arrange them under your assets root using the layout
+above, and point `TRAC_ASSETS` at it:
 
-2. Extract it so the folders above sit directly inside your chosen assets root.
-
-   ```bash
-   # option A: extract into this folder (default location)
-   unzip trac_reproducibility_assets.zip -d reproducibility
-
-   # option B: extract anywhere and point TRAC_ASSETS at it
-   unzip trac_reproducibility_assets.zip -d /path/to/assets
-   export TRAC_ASSETS=/path/to/assets           # Windows: setx TRAC_ASSETS "C:\path\to\assets"
-   ```
+```bash
+export TRAC_ASSETS=/path/to/assets           # Windows: $env:TRAC_ASSETS="C:\path\to\assets"
+```
 
 ## Reproduce
 
 ```bash
-python cli.py reproduce --rq 2      # Table 2 (uses the downloaded checkpoints)
-python cli.py reproduce --rq 4      # Table 4
+python cli.py reproduce --rq 2 --source pretrained   # Table 2 (uses the checkpoints)
+python cli.py reproduce --rq 4                        # Table 4
+python cli.py reproduce --rq 2 --source train         # or regenerate + retrain, no assets
 ```
 
 > If the assets are absent, the platform still works end to end — it will
 > **generate** data and **train** fresh models on the fly (see the main README).
-> The downloaded assets are only needed to reproduce the paper's *pretrained*
-> numbers exactly.
+> The assets are only needed to reproduce the paper's *pretrained* numbers exactly.
