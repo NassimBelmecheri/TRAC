@@ -68,7 +68,7 @@ class TransformerOracle(Oracle):
                 vec[idx] = int(val)
         return vec
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _probability(self, vec):
         t = torch.from_numpy(vec).unsqueeze(0).to(self.device)
         mask = (t == 0)

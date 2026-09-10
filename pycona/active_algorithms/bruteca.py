@@ -154,10 +154,13 @@ class BruteCA(AlgorithmCAInteractive):
                 break
 
         # --- STRATEGY 2: CP FALLBACK (satisfy L on the scope, violate target_c) ---
+        # Bounded by ``time_limit`` so a hard/large sub-problem cannot stall the
+        # whole acquisition loop (critical on large-bias benchmarks such as
+        # job_shop / random495 where an unbounded solve can hang for minutes).
         try:
             m = cp.Model(list(sub_cl))
             m += ~target_c
-            if m.solve():
+            if m.solve(time_limit=max(0.5, time_limit)):
                 return target_c._args
         except Exception:
             pass
