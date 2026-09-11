@@ -162,6 +162,14 @@ class MQuAcq2(AlgorithmCAInteractive):
 
             scope = get_scope(c)
 
+            # The neighbour adjacency matrix (and the quasi-clique heuristic that
+            # consumes it) is defined only over *binary* constraints, i.e. edges
+            # between exactly two variables. Unary constraints (e.g. zebra's
+            # ``milk == 3``) or higher-arity constraints contribute no such edge,
+            # so skip them instead of indexing a non-existent ``scope[1]``.
+            if len(scope) != 2:
+                continue
+
             i = self.hashX.index(hash(scope[0]))
             j = self.hashX.index(hash(scope[1]))
 
